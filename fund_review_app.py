@@ -7,12 +7,12 @@ DB = "fund_checklist_table.db"
 TODAY = lambda: datetime.today().strftime("%Y-%m-%d")
 
 STEPS = [
-    ("step2_outreach", "2) Optional Outreach"),
-    ("step3_analyst",  "3) Analyst Review"),
-    ("step4_vp",       "4) VP Review"),
-    ("step5_partner",  "5) Partner Confirmation"),
-    ("step6_feedback", "6) Feedback Call"),
-    ("step7_rejected", "7) Rejected"),
+    ("step2_inforequest", "Info Request"),
+    ("step3_analyst",     "Analyst"),
+    ("step4_myreview",    "My Review"),
+    ("step5_partner",     "Partner"),
+    ("step6_email",       "Email"),
+    ("step7_rejected",    "Rejected"),
 ]
 
 st.set_page_config(page_title="Fund Checklist", layout="wide")
@@ -20,8 +20,11 @@ st.set_page_config(page_title="Fund Checklist", layout="wide")
 # ---- Styling ----
 st.markdown("""
 <style>
-.block-container {padding-top: 0.5rem; max-width: 1100px;}
-.dataframe td, .dataframe th {font-size: 0.9rem;}
+.block-container {padding-top: 0.5rem; max-width: 1400px;}
+.data-editor-row:hover {background-color: #f9f9f9;}
+.stDataFrame td, .stDataFrame th {font-size: 0.95rem; padding: 6px;}
+h2, h3 {margin: .25rem 0;}
+.small {color:#6b6b6b;font-size:.9rem;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -37,18 +40,18 @@ def init_db():
                 ord INTEGER DEFAULT 1000,
                 fund_name TEXT NOT NULL,
                 assigned_date TEXT NOT NULL,
-                step2_outreach INTEGER DEFAULT 0,
-                step3_analyst  INTEGER DEFAULT 0,
-                step4_vp       INTEGER DEFAULT 0,
-                step5_partner  INTEGER DEFAULT 0,
-                step6_feedback INTEGER DEFAULT 0,
-                step7_rejected INTEGER DEFAULT 0,
-                step2_outreach_date TEXT,
-                step3_analyst_date  TEXT,
-                step4_vp_date       TEXT,
-                step5_partner_date  TEXT,
-                step6_feedback_date TEXT,
-                step7_rejected_date TEXT
+                step2_inforequest INTEGER DEFAULT 0,
+                step3_analyst     INTEGER DEFAULT 0,
+                step4_myreview    INTEGER DEFAULT 0,
+                step5_partner     INTEGER DEFAULT 0,
+                step6_email       INTEGER DEFAULT 0,
+                step7_rejected    INTEGER DEFAULT 0,
+                step2_inforequest_date TEXT,
+                step3_analyst_date     TEXT,
+                step4_myreview_date    TEXT,
+                step5_partner_date     TEXT,
+                step6_email_date       TEXT,
+                step7_rejected_date    TEXT
             )
         """)
         c.commit()
@@ -85,6 +88,7 @@ def stamp_if_new(old_val, new_val, old_date):
 init_db()
 
 st.markdown("## ✅ Fund Review Checklist")
+st.markdown("<div class='small'>Add a fund (name + date). Tick steps as you complete them — dates are stored and shown on hover. 'Rejected' rows can be deleted instantly.</div>", unsafe_allow_html=True)
 
 # Add fund form
 with st.form("add_fund", clear_on_submit=True):
@@ -102,45 +106,44 @@ if df.empty:
     st.info("No funds yet. Add your first fund above.")
     st.stop()
 
-# Ensure correct dtypes
+# Ensure correct types
 df["assigned_date"] = pd.to_datetime(df["assigned_date"], errors="coerce").dt.date
 for col, _ in STEPS:
     df[col] = df[col].astype(bool)
 
-# Display table with checkboxes
+# Table rendering
 for idx, row in df.iterrows():
-    cols = st.columns([0.5, 2, 1] + [1]*len(STEPS) + [0.7])
+    cols = st.columns([0.6, 3, 1] + [1]*len(STEPS) + [0.7])
     # Order
     new_ord = cols[0].number_input("", value=int(row["ord"]), step=1, label_visibility="collapsed", key=f"ord_{row['id']}")
     if new_ord != row["ord"]:
         update_field(row["id"], "ord", new_ord)
-        st.experimental_rerun()
+        st.rerun()
 
     # Fund name
     new_name = cols[1].text_input("", value=row["fund_name"], label_visibility="collapsed", key=f"name_{row['id']}")
     if new_name != row["fund_name"]:
         update_field(row["id"], "fund_name", new_name)
-        st.experimental_rerun()
+        st.rerun()
 
     # Assigned date
     new_assigned = cols[2].date_input("", value=row["assigned_date"], label_visibility="collapsed", key=f"assigned_{row['id']}")
     if new_assigned != row["assigned_date"]:
         update_field(row["id"], "assigned_date", str(new_assigned))
-        st.experimental_rerun()
+        st.rerun()
 
     # Steps
     for step_idx, (colname, label) in enumerate(STEPS):
         tooltip = f"Completed: {row[colname + '_date']}" if row[colname + '_date'] else "Not completed yet"
         checked = cols[3+step_idx].checkbox(label, value=row[colname], help=tooltip, key=f"{colname}_{row['id']}")
         if checked != row[colname]:
-            # stamp date if first time checked
             date_stamp = stamp_if_new(row[colname], checked, row[colname + "_date"])
             update_field(row["id"], colname, int(checked))
             update_field(row["id"], colname + "_date", date_stamp)
-            st.experimental_rerun()
+            st.rerun()
 
-    # Delete button (only allowed if Rejected is checked)
+    # Delete button for rejected
     if row["step7_rejected"]:
         if cols[-1].button("🗑️", key=f"del_{row['id']}", help="Delete this rejected fund"):
             delete_row(row["id"])
-            st.experimental_rerun()
+            st.rerun()
