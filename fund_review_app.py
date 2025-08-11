@@ -18,13 +18,12 @@ STEPS = [
 st.set_page_config(page_title="Fund Checklist", layout="wide")
 
 # ---- Styling ----
-st.markdown('''
+st.markdown("""
 <style>
-.block-container {padding-top: 1rem; max-width: 1200px;}
-.card {background:#fff;border:1px solid #e6e6ef;border-radius:12px;padding:1rem 1.2rem;margin:.6rem 0;}
-h2, h3 {margin: .25rem 0;}
-.small {color:#6b6b6b;font-size:.9rem;}
-</style>''', unsafe_allow_html=True)
+.block-container {padding-top: 0.5rem; max-width: 1100px;}
+.dataframe td, .dataframe th {font-size: 0.9rem;}
+</style>
+""", unsafe_allow_html=True)
 
 # ---- DB helpers ----
 def conn():
@@ -67,19 +66,14 @@ def add_fund(name, assigned):
         )
         c.commit()
 
-def update_row(row):
+def update_field(row_id, field, value):
     with conn() as c:
-        cols = [k for k in row.keys() if k != "id"]
-        set_expr = ",".join([f"{k}=?" for k in cols])
-        c.execute(f"UPDATE funds SET {set_expr} WHERE id=?", [row[k] for k in cols] + [row["id"]])
+        c.execute(f"UPDATE funds SET {field}=? WHERE id=?", (value, row_id))
         c.commit()
 
-def delete_rows(ids):
-    if not ids: 
-        return
+def delete_row(row_id):
     with conn() as c:
-        qmarks = ",".join(["?"]*len(ids))
-        c.execute(f"DELETE FROM funds WHERE id IN ({qmarks})", ids)
+        c.execute("DELETE FROM funds WHERE id=?", (row_id,))
         c.commit()
 
 def stamp_if_new(old_val, new_val, old_date):
@@ -91,15 +85,8 @@ def stamp_if_new(old_val, new_val, old_date):
 init_db()
 
 st.markdown("## ✅ Fund Review Checklist")
-st.markdown(
-    "<div class='small'>Add a fund (name + date). "
-    "Check boxes as you complete steps — we stamp the date the first time and keep it. "
-    "Edit the 'Order' number to rearrange rows. "
-    "Mark 'Rejected', tick 'Delete', then Save to remove a row.</div>",
-    unsafe_allow_html=True
-)
 
-# Add fund inline
+# Add fund form
 with st.form("add_fund", clear_on_submit=True):
     c1, c2, c3 = st.columns([3,2,1])
     fund_name = c1.text_input("Fund Name")
@@ -108,93 +95,52 @@ with st.form("add_fund", clear_on_submit=True):
     if submitted and fund_name.strip():
         add_fund(fund_name, assigned)
         st.success("Added fund.")
+        st.rerun()
 
-# Load current
 df = load_df()
 if df.empty:
     st.info("No funds yet. Add your first fund above.")
     st.stop()
 
-# Build editable DataFrame
-view_cols = ["id","ord","fund_name","assigned_date"]
+# Ensure correct dtypes
+df["assigned_date"] = pd.to_datetime(df["assigned_date"], errors="coerce").dt.date
 for col, _ in STEPS:
-    view_cols += [col, col + "_date"]
-view_cols.append("Delete")
+    df[col] = df[col].astype(bool)
 
-view = df.copy()
-view["Delete"] = False
-
-# ---- Force correct types ----
-# Dates: must be datetime.date or NaT for DateColumn
-view["assigned_date"] = pd.to_datetime(view["assigned_date"], errors="coerce").dt.date
-for col, _ in STEPS:
-    view[col + "_date"] = pd.to_datetime(view[col + "_date"], errors="coerce").dt.date
-# Booleans for checkboxes
-for col, _ in STEPS:
-    view[col] = view[col].astype(bool)
-view["Delete"] = view["Delete"].astype(bool)
-
-# Configure columns
-col_cfg = {
-    "ord": st.column_config.NumberColumn("Order", help="Lower = higher in list", step=1),
-    "fund_name": st.column_config.TextColumn("Fund Name"),
-    "assigned_date": st.column_config.DateColumn("Assigned"),
-}
-for col, label in STEPS:
-    col_cfg[col] = st.column_config.CheckboxColumn(label)
-    col_cfg[col + "_date"] = st.column_config.DateColumn(label.replace(")", " date)"), disabled=True)
-col_cfg["Delete"] = st.column_config.CheckboxColumn("Delete (only if Rejected is checked)")
-
-st.markdown("### Your funds")
-edited = st.data_editor(
-    view[view_cols],
-    column_config=col_cfg,
-    use_container_width=True,
-    hide_index=True,
-    num_rows="fixed",
-    key="editor"
-)
-
-# Save/apply
-cL, cM, _ = st.columns([1,1,4])
-save_clicked = cL.button("💾 Save changes", type="primary")
-del_clicked  = cM.button("🗑️ Delete all rows marked 'Delete'")
-
-if save_clicked or del_clicked:
-    ids_to_delete = [
-        int(r["id"])
-        for _, r in edited.iterrows()
-        if bool(r.get("Delete")) and bool(r.get("step7_rejected"))
-    ]
-    if del_clicked and ids_to_delete:
-        delete_rows(ids_to_delete)
-        st.success(f"Deleted {len(ids_to_delete)} rejected fund(s).")
+# Display table with checkboxes
+for idx, row in df.iterrows():
+    cols = st.columns([0.5, 2, 1] + [1]*len(STEPS) + [0.7])
+    # Order
+    new_ord = cols[0].number_input("", value=int(row["ord"]), step=1, label_visibility="collapsed", key=f"ord_{row['id']}")
+    if new_ord != row["ord"]:
+        update_field(row["id"], "ord", new_ord)
         st.experimental_rerun()
 
-    orig = df.set_index("id")
-    updates = []
-    for _, r in edited.iterrows():
-        rid = int(r["id"])
-        if rid in ids_to_delete:
-            continue
-        base = orig.loc[rid].to_dict()
-        new = {
-            "id": rid,
-            "ord": int(r["ord"]),
-            "fund_name": str(r["fund_name"]).strip(),
-            "assigned_date": str(r["assigned_date"]),
-        }
-        for col, _ in STEPS:
-            new_val  = 1 if bool(r[col]) else 0
-            old_val  = int(base[col])
-            old_date = (base[col + "_date"] or "")
-            stamped  = stamp_if_new(old_val, new_val, old_date)
-            new[col] = new_val
-            new[col + "_date"] = stamped
-        updates.append(new)
+    # Fund name
+    new_name = cols[1].text_input("", value=row["fund_name"], label_visibility="collapsed", key=f"name_{row['id']}")
+    if new_name != row["fund_name"]:
+        update_field(row["id"], "fund_name", new_name)
+        st.experimental_rerun()
 
-    for row in updates:
-        update_row(row)
+    # Assigned date
+    new_assigned = cols[2].date_input("", value=row["assigned_date"], label_visibility="collapsed", key=f"assigned_{row['id']}")
+    if new_assigned != row["assigned_date"]:
+        update_field(row["id"], "assigned_date", str(new_assigned))
+        st.experimental_rerun()
 
-    st.success("Saved.")
-    st.experimental_rerun()
+    # Steps
+    for step_idx, (colname, label) in enumerate(STEPS):
+        tooltip = f"Completed: {row[colname + '_date']}" if row[colname + '_date'] else "Not completed yet"
+        checked = cols[3+step_idx].checkbox(label, value=row[colname], help=tooltip, key=f"{colname}_{row['id']}")
+        if checked != row[colname]:
+            # stamp date if first time checked
+            date_stamp = stamp_if_new(row[colname], checked, row[colname + "_date"])
+            update_field(row["id"], colname, int(checked))
+            update_field(row["id"], colname + "_date", date_stamp)
+            st.experimental_rerun()
+
+    # Delete button (only allowed if Rejected is checked)
+    if row["step7_rejected"]:
+        if cols[-1].button("🗑️", key=f"del_{row['id']}", help="Delete this rejected fund"):
+            delete_row(row["id"])
+            st.experimental_rerun()
