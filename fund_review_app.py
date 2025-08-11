@@ -1,10 +1,11 @@
 import streamlit as st
 import pandas as pd
 import sqlite3
-from datetime import datetime, date
+from datetime import datetime
 
-# -------------------- Config --------------------
-DB = "fund_checklist.db"
+DB = "fund_checklist_table.db"
+TODAY = lambda: datetime.today().strftime("%Y-%m-%d")
+
 STEPS = [
     ("step2_outreach", "2) Optional Outreach"),
     ("step3_analyst",  "3) Analyst Review"),
@@ -16,23 +17,16 @@ STEPS = [
 
 st.set_page_config(page_title="Fund Checklist", layout="wide")
 
-# -------------------- Light styling --------------------
-st.markdown("""
+# ---- Styling ----
+st.markdown('''
 <style>
-/* cleaner page widths */
 .block-container {padding-top: 1rem; max-width: 1200px;}
-/* section cards */
-.card {background: #ffffff; border: 1px solid #e6e6ef; border-radius: 12px; padding: 1rem 1.2rem; margin-bottom: 0.8rem;}
-.card h4 {margin: 0 0 .4rem 0;}
-.small {color:#6b6b6b; font-size:0.9rem;}
-.pill {display:inline-block; padding:.2rem .55rem; border-radius:999px; border:1px solid #e3e3ee; margin:.15rem .25rem .15rem 0; font-size:0.85rem;}
-.pill.done {background:#eefbf1; border-color:#c6efce;}
-.pill.todo {background:#f7f7fb;}
-.kpi {font-weight:600; font-size:1.1rem;}
-</style>
-""", unsafe_allow_html=True)
+.card {background:#fff;border:1px solid #e6e6ef;border-radius:12px;padding:1rem 1.2rem;margin:.6rem 0;}
+h2, h3 {margin: .25rem 0;}
+.small {color:#6b6b6b;font-size:.9rem;}
+</style>''', unsafe_allow_html=True)
 
-# -------------------- DB helpers --------------------
+# ---- DB helpers ----
 def conn():
     return sqlite3.connect(DB, check_same_thread=False)
 
@@ -41,143 +35,152 @@ def init_db():
         c.execute("""
             CREATE TABLE IF NOT EXISTS funds (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ord INTEGER DEFAULT 1000,
                 fund_name TEXT NOT NULL,
                 assigned_date TEXT NOT NULL,
-                step2_outreach TEXT,
-                step3_analyst  TEXT,
-                step4_vp       TEXT,
-                step5_partner  TEXT,
-                step6_feedback TEXT,
-                step7_rejected TEXT
+                step2_outreach INTEGER DEFAULT 0,
+                step3_analyst  INTEGER DEFAULT 0,
+                step4_vp       INTEGER DEFAULT 0,
+                step5_partner  INTEGER DEFAULT 0,
+                step6_feedback INTEGER DEFAULT 0,
+                step7_rejected INTEGER DEFAULT 0,
+                step2_outreach_date TEXT,
+                step3_analyst_date  TEXT,
+                step4_vp_date       TEXT,
+                step5_partner_date  TEXT,
+                step6_feedback_date TEXT,
+                step7_rejected_date TEXT
             )
         """)
         c.commit()
 
-def add_fund(name: str, assigned: str):
+def load_df():
     with conn() as c:
-        c.execute("""INSERT INTO funds (fund_name, assigned_date) VALUES (?,?)""",
-                  (name.strip(), assigned))
+        df = pd.read_sql_query("SELECT * FROM funds ORDER BY ord, id", c)
+    return df
+
+def add_fund(name, assigned):
+    with conn() as c:
+        cur = c.execute("SELECT COALESCE(MAX(ord), 0) FROM funds")
+        max_ord = cur.fetchone()[0] or 0
+        c.execute("""INSERT INTO funds (ord, fund_name, assigned_date) VALUES (?,?,?)""",
+                  (max_ord + 10, name.strip(), assigned))
         c.commit()
 
-def get_funds_df():
+def update_row(row):
     with conn() as c:
-        return pd.read_sql_query("SELECT * FROM funds ORDER BY id DESC", c)
-
-def set_step_date(row_id: int, col: str, value: str):
-    with conn() as c:
-        c.execute(f"UPDATE funds SET {col}=? WHERE id=?", (value, row_id))
+        cols = [k for k in row.keys() if k != "id"]
+        set_expr = ",".join([f"{k}=?" for k in cols])
+        c.execute(f"UPDATE funds SET {set_expr} WHERE id=?", [row[k] for k in cols] + [row["id"]])
         c.commit()
 
-def reset_steps(row_id: int):
+def delete_rows(ids):
+    if not ids: 
+        return
     with conn() as c:
-        sets = ",".join([f"{col}=NULL" for col,_ in STEPS])
-        c.execute(f"UPDATE funds SET {sets} WHERE id=?", (row_id,))
+        qmarks = ",".join(["?"]*len(ids))
+        c.execute(f"DELETE FROM funds WHERE id IN ({qmarks})", ids)
         c.commit()
 
-def today() -> str:
-    return datetime.today().strftime("%Y-%m-%d")
+def stamp_if_new(old_val, new_val, old_date):
+    # Stamp TODAY only if changed from 0 -> 1 and there was no date
+    if (not old_val) and bool(new_val) and (not old_date):
+        return TODAY()
+    return old_date
 
-# -------------------- App --------------------
+# ---- App ----
 init_db()
 
-# Header
-left_h, right_h = st.columns([1,2])
-with left_h:
-    st.markdown("## ✅ Fund Review Checklist")
-with right_h:
-    st.markdown(
-        "<div class='small'>Add a fund (name + assigned date). "
-        "Check boxes as you complete steps — we stamp the date once and keep it.</div>",
-        unsafe_allow_html=True
-    )
+st.markdown("## ✅ Fund Review Checklist")
+st.markdown("""<div class='small'>Add a fund (name + date). Check boxes as you complete steps — we stamp the date the first time and keep it. Edit the 'Order' number to rearrange rows. Check 'Delete' on rejected rows and click 'Save changes'.</div>""", unsafe_allow_html=True)
 
-# Layout: Sidebar = add/select; Main = checklist + overview
-with st.sidebar:
-    st.markdown("### ➕ Add a fund")
-    fund_name = st.text_input("Fund Name")
-    assigned_date = st.date_input("Assigned Date", value=pd.to_datetime('today')).strftime("%Y-%m-%d")
-    st.caption("Tip: usually today's date.")
-    add_disabled = not fund_name.strip()
-    if st.button("Add Fund", type="primary", disabled=add_disabled):
-        add_fund(fund_name, assigned_date)
-        st.success("Fund added. Select it below to update steps.")
+# Add fund inline
+with st.form("add_fund", clear_on_submit=True):
+    c1, c2, c3 = st.columns([3,2,1])
+    fund_name = c1.text_input("Fund Name")
+    assigned = c2.date_input("Assigned Date", value=pd.to_datetime("today")).strftime("%Y-%m-%d")
+    submitted = c3.form_submit_button("Add")
+    if submitted and fund_name.strip():
+        add_fund(fund_name, assigned)
+        st.success("Added fund.")
 
-    st.markdown("---")
-
-    df_all = get_funds_df()
-    if df_all.empty:
-        st.info("No funds yet. Add your first one above.")
-    else:
-        options = {f"{r['fund_name']}  •  assigned {r['assigned_date']}": int(r['id']) for _, r in df_all.iterrows()}
-        selected_label = st.selectbox("Select a fund", list(options.keys()))
-        fund_id = options[selected_label]
-
-# Stop early if no data
-if df_all.empty:
+# Load current
+df = load_df()
+if df.empty:
+    st.info("No funds yet. Add your first fund above.")
     st.stop()
 
-row = df_all[df_all["id"] == fund_id].iloc[0]
+# Build an editable view DataFrame
+view_cols = ["id","ord","fund_name","assigned_date"]
+for col, _ in STEPS:
+    view_cols.append(col)
+    view_cols.append(col + "_date")
+view_cols.append("Delete")
 
-# -------------------- Progress + Pills --------------------
-done_count = sum(1 for col,_ in STEPS if pd.notna(row[col]) and str(row[col]).strip() != "")
-progress = int(round((done_count/len(STEPS))*100, 0))
-pcol1, pcol2, pcol3 = st.columns([2,1,1])
-with pcol1:
-    st.markdown(f"<div class='card'><h4>📊 Progress</h4><div class='kpi'>{progress}% complete</div></div>", unsafe_allow_html=True)
-with pcol2:
-    st.markdown(f"<div class='card'><h4>🗂️ Fund</h4><div class='kpi'>{row['fund_name']}</div><div class='small'>Assigned {row['assigned_date']}</div></div>", unsafe_allow_html=True)
-with pcol3:
-    if st.button("Reset all step dates", help="Clears all completion dates for this fund (does not remove the fund)."):
-        reset_steps(int(fund_id))
-        st.warning("All step dates cleared for this fund. Reload if you don't see it update.")
+# Compute the view
+view = df.copy()
+view["Delete"] = False
 
-st.progress(progress/100)
-
-# Status pills
-pill_html = ""
+# Configure columns for data_editor
+col_cfg = {
+    "ord": st.column_config.NumberColumn("Order", help="Type numbers; lower comes first", step=1),
+    "fund_name": st.column_config.TextColumn("Fund Name"),
+    "assigned_date": st.column_config.DateColumn("Assigned"),
+}
 for col, label in STEPS:
-    dt = (row[col] or "").strip() if pd.notna(row[col]) else ""
-    if dt:
-        pill_html += f"<span class='pill done'>{label}: {dt}</span>"
-    else:
-        pill_html += f"<span class='pill todo'>{label}: —</span>"
-st.markdown(f"<div class='card'>{pill_html}</div>", unsafe_allow_html=True)
+    col_cfg[col] = st.column_config.CheckboxColumn(label)
+    col_cfg[col + "_date"] = st.column_config.TextColumn(label.replace(")", " date)"), disabled=True)
+col_cfg["Delete"] = st.column_config.CheckboxColumn("Delete (only if Rejected is checked)")
 
-# -------------------- Checklist --------------------
-st.markdown("#### ✔️ Check steps as you go")
-grid = st.columns(3)
-for i, (colname, label) in enumerate(STEPS):
-    with grid[i % 3]:
-        # Already completed?
-        already_done = pd.notna(row[colname]) and str(row[colname]).strip() != ""
-        # Checkbox shows checked if already done; starts unchecked otherwise
-        checked = st.checkbox(label, value=already_done, key=f"{colname}_{fund_id}")
-        # One-way date stamping: record today's date the first time it's checked
-        if checked and not already_done:
-            set_step_date(int(fund_id), colname, today())
-
-st.markdown("---")
-
-# -------------------- Overview table + export --------------------
-st.markdown("#### 📒 All funds (read-only)")
-pretty = df_all.rename(columns={
-    "fund_name":"Fund",
-    "assigned_date":"Assigned",
-    "step2_outreach":"2) Outreach",
-    "step3_analyst":"3) Analyst",
-    "step4_vp":"4) VP",
-    "step5_partner":"5) Partner",
-    "step6_feedback":"6) Feedback",
-    "step7_rejected":"7) Rejected",
-})
-st.dataframe(pretty[["id","Fund","Assigned","2) Outreach","3) Analyst","4) VP","5) Partner","6) Feedback","7) Rejected"]],
-             use_container_width=True, hide_index=True)
-
-st.download_button(
-    "⬇️ Export to CSV",
-    pretty.to_csv(index=False).encode("utf-8"),
-    file_name="fund_checklist_export.csv",
-    mime="text/csv"
+st.markdown("### Your funds")
+edited = st.data_editor(
+    view[view_cols],
+    column_config=col_cfg,
+    use_container_width=True,
+    hide_index=True,
+    num_rows="fixed",
+    key="editor"
 )
 
+# Save and apply changes
+cL, cM, cR = st.columns([1,1,3])
+save_clicked = cL.button("💾 Save changes", type="primary")
+del_clicked = cM.button("🗑️ Delete all rows marked 'Delete'")
 
+if save_clicked or del_clicked:
+    # Determine deletions first
+    ids_to_delete = [int(r["id"]) for _, r in edited.iterrows() if bool(r.get("Delete")) and bool(r.get("step7_rejected"))]
+    if del_clicked and ids_to_delete:
+        delete_rows(ids_to_delete)
+        st.success(f"Deleted {len(ids_to_delete)} rejected fund(s).")
+        st.experimental_rerun()
+
+    # Merge updates
+    updates = []
+    orig = df.set_index("id")
+    for _, r in edited.iterrows():
+        rid = int(r["id"])
+        if rid in ids_to_delete:
+            continue
+        base = orig.loc[rid].to_dict()
+        new = {
+            "id": rid,
+            "ord": int(r["ord"]),
+            "fund_name": str(r["fund_name"]).strip(),
+            "assigned_date": str(r["assigned_date"]),
+        }
+        # Steps + date-stamps
+        for col, _ in STEPS:
+            new_val = 1 if bool(r[col]) else 0
+            old_val = int(base[col])
+            old_date = (base[col + "_date"] or "")
+            stamped = stamp_if_new(old_val, new_val, old_date)
+            new[col] = new_val
+            new[col + "_date"] = stamped
+        updates.append(new)
+
+    for row in updates:
+        update_row(row)
+
+    st.success("Saved.")
+    st.experimental_rerun()
