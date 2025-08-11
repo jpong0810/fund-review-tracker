@@ -60,7 +60,6 @@ def load_df():
 
 def add_fund(name, assigned):
     with conn() as c:
-        # new funds go to bottom: ord = current max + 10
         max_ord = c.execute("SELECT COALESCE(MAX(ord), 0) FROM funds").fetchone()[0] or 0
         c.execute(
             "INSERT INTO funds (ord, fund_name, assigned_date) VALUES (?,?,?)",
@@ -84,7 +83,6 @@ def delete_rows(ids):
         c.commit()
 
 def stamp_if_new(old_val, new_val, old_date):
-    """Stamp TODAY only when changing from 0 -> 1 and there was no date yet."""
     if (not old_val) and bool(new_val) and (not old_date):
         return TODAY()
     return old_date
@@ -117,7 +115,7 @@ if df.empty:
     st.info("No funds yet. Add your first fund above.")
     st.stop()
 
-# Build an editable view DataFrame
+# Build editable DataFrame
 view_cols = ["id","ord","fund_name","assigned_date"]
 for col, _ in STEPS:
     view_cols += [col, col + "_date"]
@@ -126,7 +124,17 @@ view_cols.append("Delete")
 view = df.copy()
 view["Delete"] = False
 
-# Configure editor columns
+# ---- Force correct types ----
+# Dates: must be datetime.date or NaT for DateColumn
+view["assigned_date"] = pd.to_datetime(view["assigned_date"], errors="coerce").dt.date
+for col, _ in STEPS:
+    view[col + "_date"] = pd.to_datetime(view[col + "_date"], errors="coerce").dt.date
+# Booleans for checkboxes
+for col, _ in STEPS:
+    view[col] = view[col].astype(bool)
+view["Delete"] = view["Delete"].astype(bool)
+
+# Configure columns
 col_cfg = {
     "ord": st.column_config.NumberColumn("Order", help="Lower = higher in list", step=1),
     "fund_name": st.column_config.TextColumn("Fund Name"),
@@ -134,7 +142,7 @@ col_cfg = {
 }
 for col, label in STEPS:
     col_cfg[col] = st.column_config.CheckboxColumn(label)
-    col_cfg[col + "_date"] = st.column_config.TextColumn(label.replace(")", " date)"), disabled=True)
+    col_cfg[col + "_date"] = st.column_config.DateColumn(label.replace(")", " date)"), disabled=True)
 col_cfg["Delete"] = st.column_config.CheckboxColumn("Delete (only if Rejected is checked)")
 
 st.markdown("### Your funds")
@@ -153,7 +161,6 @@ save_clicked = cL.button("💾 Save changes", type="primary")
 del_clicked  = cM.button("🗑️ Delete all rows marked 'Delete'")
 
 if save_clicked or del_clicked:
-    # Deletions first (only allowed if Rejected is checked)
     ids_to_delete = [
         int(r["id"])
         for _, r in edited.iterrows()
@@ -164,7 +171,6 @@ if save_clicked or del_clicked:
         st.success(f"Deleted {len(ids_to_delete)} rejected fund(s).")
         st.experimental_rerun()
 
-    # Updates
     orig = df.set_index("id")
     updates = []
     for _, r in edited.iterrows():
@@ -178,7 +184,6 @@ if save_clicked or del_clicked:
             "fund_name": str(r["fund_name"]).strip(),
             "assigned_date": str(r["assigned_date"]),
         }
-        # Steps + one-way date stamping
         for col, _ in STEPS:
             new_val  = 1 if bool(r[col]) else 0
             old_val  = int(base[col])
