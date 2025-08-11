@@ -56,15 +56,16 @@ def init_db():
 
 def load_df():
     with conn() as c:
-        df = pd.read_sql_query("SELECT * FROM funds ORDER BY ord, id", c)
-    return df
+        return pd.read_sql_query("SELECT * FROM funds ORDER BY ord, id", c)
 
 def add_fund(name, assigned):
     with conn() as c:
-        cur = c.execute("SELECT COALESCE(MAX(ord), 0) FROM funds")
-        max_ord = cur.fetchone()[0] or 0
-        c.execute("""INSERT INTO funds (ord, fund_name, assigned_date) VALUES (?,?,?)""",
-                  (max_ord + 10, name.strip(), assigned))
+        # new funds go to bottom: ord = current max + 10
+        max_ord = c.execute("SELECT COALESCE(MAX(ord), 0) FROM funds").fetchone()[0] or 0
+        c.execute(
+            "INSERT INTO funds (ord, fund_name, assigned_date) VALUES (?,?,?)",
+            (max_ord + 10, name.strip(), assigned)
+        )
         c.commit()
 
 def update_row(row):
@@ -83,7 +84,7 @@ def delete_rows(ids):
         c.commit()
 
 def stamp_if_new(old_val, new_val, old_date):
-    # Stamp TODAY only if changed from 0 -> 1 and there was no date
+    """Stamp TODAY only when changing from 0 -> 1 and there was no date yet."""
     if (not old_val) and bool(new_val) and (not old_date):
         return TODAY()
     return old_date
@@ -92,7 +93,13 @@ def stamp_if_new(old_val, new_val, old_date):
 init_db()
 
 st.markdown("## ✅ Fund Review Checklist")
-st.markdown("""<div class='small'>Add a fund (name + date). Check boxes as you complete steps — we stamp the date the first time and keep it. Edit the 'Order' number to rearrange rows. Check 'Delete' on rejected rows and click 'Save changes'.</div>""", unsafe_allow_html=True)
+st.markdown(
+    "<div class='small'>Add a fund (name + date). "
+    "Check boxes as you complete steps — we stamp the date the first time and keep it. "
+    "Edit the 'Order' number to rearrange rows. "
+    "Mark 'Rejected', tick 'Delete', then Save to remove a row.</div>",
+    unsafe_allow_html=True
+)
 
 # Add fund inline
 with st.form("add_fund", clear_on_submit=True):
@@ -113,17 +120,15 @@ if df.empty:
 # Build an editable view DataFrame
 view_cols = ["id","ord","fund_name","assigned_date"]
 for col, _ in STEPS:
-    view_cols.append(col)
-    view_cols.append(col + "_date")
+    view_cols += [col, col + "_date"]
 view_cols.append("Delete")
 
-# Compute the view
 view = df.copy()
 view["Delete"] = False
 
-# Configure columns for data_editor
+# Configure editor columns
 col_cfg = {
-    "ord": st.column_config.NumberColumn("Order", help="Type numbers; lower comes first", step=1),
+    "ord": st.column_config.NumberColumn("Order", help="Lower = higher in list", step=1),
     "fund_name": st.column_config.TextColumn("Fund Name"),
     "assigned_date": st.column_config.DateColumn("Assigned"),
 }
@@ -142,22 +147,26 @@ edited = st.data_editor(
     key="editor"
 )
 
-# Save and apply changes
-cL, cM, cR = st.columns([1,1,3])
+# Save/apply
+cL, cM, _ = st.columns([1,1,4])
 save_clicked = cL.button("💾 Save changes", type="primary")
-del_clicked = cM.button("🗑️ Delete all rows marked 'Delete'")
+del_clicked  = cM.button("🗑️ Delete all rows marked 'Delete'")
 
 if save_clicked or del_clicked:
-    # Determine deletions first
-    ids_to_delete = [int(r["id"]) for _, r in edited.iterrows() if bool(r.get("Delete")) and bool(r.get("step7_rejected"))]
+    # Deletions first (only allowed if Rejected is checked)
+    ids_to_delete = [
+        int(r["id"])
+        for _, r in edited.iterrows()
+        if bool(r.get("Delete")) and bool(r.get("step7_rejected"))
+    ]
     if del_clicked and ids_to_delete:
         delete_rows(ids_to_delete)
         st.success(f"Deleted {len(ids_to_delete)} rejected fund(s).")
         st.experimental_rerun()
 
-    # Merge updates
-    updates = []
+    # Updates
     orig = df.set_index("id")
+    updates = []
     for _, r in edited.iterrows():
         rid = int(r["id"])
         if rid in ids_to_delete:
@@ -169,12 +178,12 @@ if save_clicked or del_clicked:
             "fund_name": str(r["fund_name"]).strip(),
             "assigned_date": str(r["assigned_date"]),
         }
-        # Steps + date-stamps
+        # Steps + one-way date stamping
         for col, _ in STEPS:
-            new_val = 1 if bool(r[col]) else 0
-            old_val = int(base[col])
+            new_val  = 1 if bool(r[col]) else 0
+            old_val  = int(base[col])
             old_date = (base[col + "_date"] or "")
-            stamped = stamp_if_new(old_val, new_val, old_date)
+            stamped  = stamp_if_new(old_val, new_val, old_date)
             new[col] = new_val
             new[col + "_date"] = stamped
         updates.append(new)
